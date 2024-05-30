@@ -110,7 +110,7 @@ class FastLinearROCm(torch.nn.Module):
 
 def get_linear(weight, bias, quantize):
     if quantize is None:
-        if SYSTEM == "rocm":
+        if False and SYSTEM == "rocm":
             linear = FastLinearROCm(weight, bias)
         else:
             linear = FastLinear(weight, bias)

@@ -443,7 +443,10 @@ class FlashLlamaForCausalLM(torch.nn.Module):
         prefill_cache_indices: Optional[torch.Tensor] = None,
         lm_head_indices: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        torch.save(input_ids, f"input_ids_step{self.model.step}.pt")
         inputs_embeds = self.embed_tokens(input_ids)
+        torch.save(inputs_embeds, f"inputs_embeds_step{self.model.step}.pt")
+
         hidden_states = self.model(
             inputs_embeds,
             position_ids,
