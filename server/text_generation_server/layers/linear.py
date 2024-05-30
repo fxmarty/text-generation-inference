@@ -5,6 +5,9 @@ from text_generation_server.utils.import_utils import SYSTEM
 from text_generation_server.layers.exl2 import Exl2Weight
 from text_generation_server.layers.gptq import GPTQWeight
 
+import os
+from loguru import logger
+
 if SYSTEM == "rocm":
     try:
         from vllm import _custom_C
@@ -77,10 +80,23 @@ class FastLinearROCm(torch.nn.Module):
                 inp_shape[0], weight.shape[0], dtype=inp.dtype, device="cuda"
             )
             if (k == 8192 and (m == 1280 or m == 7168)) or (k == 3584 and m == 8192):
+                logger.info(f"[rank {os.getenv('RANK')}] using _custom_C.LLMM1 block 8")
+                logger.info(f"[rank {os.getenv('RANK')}] weigth shape {weight.shape}")
+                logger.info(f"[rank {os.getenv('RANK')}] inp shape {inp.shape}")
                 _custom_C.LLMM1(weight, inp, out, 8)
             elif k <= 8192 and k % 8 == 0 and m % 4 == 0:
+                logger.info(f"[rank {os.getenv('RANK')}] using _custom_C.LLMM1 block 4")
+                logger.info(
+                    f"[rank {os.getenv('RANK')}] weigth shape {weight.shape}, contiguous={weight.is_contiguous()}"
+                )
+                logger.info(
+                    f"[rank {os.getenv('RANK')}] inp shape {inp.shape}, contiguous={inp.is_contiguous()}"
+                )
                 _custom_C.LLMM1(weight, inp, out, 4)
             else:
+                logger.info(f"[rank {os.getenv('RANK')}] using normal linear")
+                logger.info(f"[rank {os.getenv('RANK')}] weigth shape {weight.shape}")
+                logger.info(f"[rank {os.getenv('RANK')}] inp shape {inp.shape}")
                 out = F.linear(inp, weight)
 
             if batched:

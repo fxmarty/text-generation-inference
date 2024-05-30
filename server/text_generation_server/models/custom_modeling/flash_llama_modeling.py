@@ -39,6 +39,8 @@ from text_generation_server.layers.rotary import PositionRotaryEmbedding
 from text_generation_server.layers.layernorm import (
     FastRMSNorm,
 )
+import os
+from loguru import logger
 
 if SYSTEM == "rocm":
     try:
@@ -82,6 +84,7 @@ class FlashLlamaAttention(torch.nn.Module):
         prefix: str,
         config,
         weights,
+        layer_idx,
     ):
         super().__init__()
         self.num_heads = config.num_attention_heads
@@ -109,6 +112,7 @@ class FlashLlamaAttention(torch.nn.Module):
 
         self.query_key_value = load_attention(config, prefix, weights)
 
+        logger.info(f"[rank {os.getenv('RANK')}] loading self.o_proj")
         self.o_proj = TensorParallelRowLinear.load(
             config,
             prefix=f"{prefix}.o_proj",
@@ -119,6 +123,8 @@ class FlashLlamaAttention(torch.nn.Module):
         self.kv_head_mapping = torch.arange(
             0, self.num_key_value_heads, dtype=torch.int32, device=weights.device
         ).repeat_interleave(self.num_groups)
+
+        self.layer_idx = layer_idx
 
     def forward(
         self,
@@ -131,8 +137,14 @@ class FlashLlamaAttention(torch.nn.Module):
         slots,
         input_lengths,
         max_s,
+        step,
     ):
+        logger.info(f"[rank {os.getenv('RANK')}] call query_key_value")
         qkv = self.query_key_value(hidden_states)
+
+        if self.layer_idx < 3:
+            torch.save(qkv, f"qkv_out_step{step}_layer{self.layer_idx}.pt")
+
         query, kv = qkv.split(
             [
                 self.head_size * self.num_heads,
@@ -178,7 +190,13 @@ class FlashLlamaAttention(torch.nn.Module):
                 max_s,
             )
 
-        return self.o_proj(attn_output.view(-1, self.num_heads * self.head_size))
+        logger.info(f"[rank {os.getenv('RANK')}] call o_proj")
+        res = self.o_proj(attn_output.view(-1, self.num_heads * self.head_size))
+
+        if self.layer_idx < 3:
+            torch.save(res, f"o_proj_out_step{step}_layer{self.layer_idx}.pt")
+
+        return res
 
 
 class LlamaMLP(nn.Module):
@@ -229,7 +247,8 @@ class LlamaMLP(nn.Module):
 
     def forward(self, hidden_states):
         if (
-            SYSTEM == "rocm"
+            False
+            and SYSTEM == "rocm"
             and self.hidden_act == "silu"
             and hidden_states.shape[0] == 1
             and not self.quantize
@@ -243,16 +262,22 @@ class LlamaMLP(nn.Module):
             _custom_C.LLMM_Silu(self.gate_up_proj.linear.weight, hidden_states, out, 8)
             return self.down_proj(out)
         else:
+            logger.info(f"[rank {os.getenv('RANK')}] call gate_up_proj")
             gate_up_states = self.gate_up_proj(hidden_states)
             gate_up_states = gate_up_states.view(-1, 2, self.intermediate_size)
+
+            logger.info(f"[rank {os.getenv('RANK')}] call down_proj")
             return self.down_proj(self.act(gate_up_states[:, 0]) * gate_up_states[:, 1])
 
 
 class FlashLlamaLayer(nn.Module):
-    def __init__(self, prefix, config, weights):
+    def __init__(self, prefix, config, weights, layer_idx):
         super().__init__()
         self.self_attn = FlashLlamaAttention(
-            prefix=f"{prefix}.self_attn", config=config, weights=weights
+            prefix=f"{prefix}.self_attn",
+            config=config,
+            weights=weights,
+            layer_idx=layer_idx,
         )
         self.mlp = LlamaMLP(prefix=f"{prefix}.mlp", config=config, weights=weights)
 
@@ -277,6 +302,7 @@ class FlashLlamaLayer(nn.Module):
         slots,
         input_lengths,
         max_s,
+        step,
     ):
         normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
 
@@ -291,6 +317,7 @@ class FlashLlamaLayer(nn.Module):
             slots,
             input_lengths,
             max_s,
+            step,
         )
 
         # faster post attention rms norm
@@ -320,6 +347,7 @@ class FlashLlamaModel(torch.nn.Module):
                     ),
                     config=config,
                     weights=weights,
+                    layer_idx=layer_id,
                 )
                 for layer_id in range(config.num_hidden_layers)
             ]
@@ -335,6 +363,7 @@ class FlashLlamaModel(torch.nn.Module):
         self.head_size = self.layers[0].self_attn.head_size
         self.num_heads = self.layers[0].self_attn.num_heads
         self.num_key_value_heads = self.layers[0].self_attn.num_key_value_heads
+        self.step = 0
 
     def forward(
         self,
@@ -370,7 +399,9 @@ class FlashLlamaModel(torch.nn.Module):
                 slots,
                 input_lengths,
                 max_s,
+                self.step,
             )
+        self.step += 1
 
         hidden_states, _ = self.norm(hidden_states, residual)
 

@@ -4,6 +4,8 @@ from typing import Iterable, List
 from text_generation_server.layers.linear import get_linear, FastLinear
 from text_generation_server.layers.exl2 import Exl2Weight
 
+from loguru import logger
+
 
 class LayerConcat(torch.nn.Module):
     """
@@ -179,6 +181,8 @@ class TensorParallelRowLinear(SuperLayer):
     @classmethod
     def load(cls, config, prefix: str, weights, bias: bool):
         weight = weights.get_multi_weights_row(prefix, quantize=config.quantize)
+
+        logger.info(f"weight in TensorParallelRowLinear load {weight.shape}")
 
         if bias and weights.process_group.rank() == 0:
             # Rank is only on the first rank process
