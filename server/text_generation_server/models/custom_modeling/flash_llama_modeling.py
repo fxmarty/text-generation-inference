@@ -143,7 +143,10 @@ class FlashLlamaAttention(torch.nn.Module):
         qkv = self.query_key_value(hidden_states)
 
         if self.layer_idx < 3:
-            torch.save(qkv, f"qkv_out_step{step}_layer{self.layer_idx}.pt")
+            torch.save(
+                qkv,
+                f"qkv_out_step{step}_layer{self.layer_idx}_rank{os.getenv('RANK')}.pt",
+            )
 
         query, kv = qkv.split(
             [
@@ -194,7 +197,10 @@ class FlashLlamaAttention(torch.nn.Module):
         res = self.o_proj(attn_output.view(-1, self.num_heads * self.head_size))
 
         if self.layer_idx < 3:
-            torch.save(res, f"o_proj_out_step{step}_layer{self.layer_idx}.pt")
+            torch.save(
+                res,
+                f"o_proj_out_step{step}_layer{self.layer_idx}_rank{os.getenv('RANK')}.pt",
+            )
 
         return res
 
@@ -443,9 +449,14 @@ class FlashLlamaForCausalLM(torch.nn.Module):
         prefill_cache_indices: Optional[torch.Tensor] = None,
         lm_head_indices: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        torch.save(input_ids, f"input_ids_step{self.model.step}.pt")
+        torch.save(
+            input_ids, f"input_ids_step{self.model.step}_rank{os.getenv('RANK')}.pt"
+        )
         inputs_embeds = self.embed_tokens(input_ids)
-        torch.save(inputs_embeds, f"inputs_embeds_step{self.model.step}.pt")
+        torch.save(
+            inputs_embeds,
+            f"inputs_embeds_step{self.model.step}_rank{os.getenv('RANK')}.pt",
+        )
 
         hidden_states = self.model(
             inputs_embeds,
