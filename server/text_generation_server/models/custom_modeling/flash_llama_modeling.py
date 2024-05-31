@@ -209,7 +209,7 @@ class FlashLlamaAttention(torch.nn.Module):
 
 
 class LlamaMLP(nn.Module):
-    def __init__(self, prefix, config, weights):
+    def __init__(self, prefix, config, weights, layer_idx):
         super().__init__()
         self.hidden_act = config.hidden_act
         self.act = (
@@ -224,6 +224,7 @@ class LlamaMLP(nn.Module):
                 ),
             )
         )
+        self.layer_idx = layer_idx
         # Fuse gate and up proj
         bias = getattr(config, "mlp_bias", False)
         if config.model_type == "phi3":
@@ -254,7 +255,7 @@ class LlamaMLP(nn.Module):
         # TODO: This is a hotfix to be removed & properly refactored.
         self.quantize = config.quantize
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states, step):
         if (
             False
             and SYSTEM == "rocm"
@@ -273,10 +274,28 @@ class LlamaMLP(nn.Module):
         else:
             logger.info(f"[rank {os.getenv('RANK')}] call gate_up_proj")
             gate_up_states = self.gate_up_proj(hidden_states)
+            if self.layer_idx < LOG_LAYERS:
+                torch.save(
+                    gate_up_states,
+                    f"gate_up_states_step{step}_layer{self.layer_idx}_rank{os.getenv('RANK')}.pt",
+                )
+
             gate_up_states = gate_up_states.view(-1, 2, self.intermediate_size)
 
-            logger.info(f"[rank {os.getenv('RANK')}] call down_proj")
-            return self.down_proj(self.act(gate_up_states[:, 0]) * gate_up_states[:, 1])
+            act_mul = self.act(gate_up_states[:, 0]) * gate_up_states[:, 1]
+            if self.layer_idx < LOG_LAYERS:
+                torch.save(
+                    act_mul,
+                    f"act_mul_gate_up_step{step}_layer{self.layer_idx}_rank{os.getenv('RANK')}.pt",
+                )
+
+            res = self.down_proj(act_mul)
+            if self.layer_idx < LOG_LAYERS:
+                torch.save(
+                    res,
+                    f"down_proj_out_step{step}_layer{self.layer_idx}_rank{os.getenv('RANK')}.pt",
+                )
+            return res
 
 
 class FlashLlamaLayer(nn.Module):
@@ -289,7 +308,9 @@ class FlashLlamaLayer(nn.Module):
             layer_idx=layer_idx,
         )
         self.layer_idx = layer_idx
-        self.mlp = LlamaMLP(prefix=f"{prefix}.mlp", config=config, weights=weights)
+        self.mlp = LlamaMLP(
+            prefix=f"{prefix}.mlp", config=config, weights=weights, layer_idx=layer_idx
+        )
 
         self.input_layernorm = FastRMSNorm.load(
             prefix=f"{prefix}.input_layernorm", weights=weights, eps=config.rms_norm_eps
@@ -347,7 +368,7 @@ class FlashLlamaLayer(nn.Module):
                 f"normed_attn_res_output_step{step}_layer{self.layer_idx}_rank{os.getenv('RANK')}.pt",
             )
 
-        mlp_output = self.mlp(normed_attn_res_output)
+        mlp_output = self.mlp(normed_attn_res_output, step)
 
         if self.layer_idx < LOG_LAYERS:
             torch.save(
