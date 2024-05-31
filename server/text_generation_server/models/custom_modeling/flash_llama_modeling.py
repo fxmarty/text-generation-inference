@@ -49,6 +49,9 @@ if SYSTEM == "rocm":
         raise ImportError(f"Could not load `vllm._custom_C`. Full error: {e}")
 
 
+LOG_LAYERS = 10
+
+
 def load_attention(config, prefix, weights):
     bias = config.attention_bias
 
@@ -142,7 +145,7 @@ class FlashLlamaAttention(torch.nn.Module):
         logger.info(f"[rank {os.getenv('RANK')}] call query_key_value")
         qkv = self.query_key_value(hidden_states)
 
-        if self.layer_idx < 3:
+        if self.layer_idx < LOG_LAYERS:
             torch.save(
                 qkv,
                 f"qkv_out_step{step}_layer{self.layer_idx}_rank{os.getenv('RANK')}.pt",
@@ -196,7 +199,7 @@ class FlashLlamaAttention(torch.nn.Module):
         logger.info(f"[rank {os.getenv('RANK')}] call o_proj")
         res = self.o_proj(attn_output.view(-1, self.num_heads * self.head_size))
 
-        if self.layer_idx < 3:
+        if self.layer_idx < LOG_LAYERS:
             torch.save(
                 res,
                 f"o_proj_out_step{step}_layer{self.layer_idx}_rank{os.getenv('RANK')}.pt",
@@ -285,6 +288,7 @@ class FlashLlamaLayer(nn.Module):
             weights=weights,
             layer_idx=layer_idx,
         )
+        self.layer_idx = layer_idx
         self.mlp = LlamaMLP(prefix=f"{prefix}.mlp", config=config, weights=weights)
 
         self.input_layernorm = FastRMSNorm.load(
@@ -312,6 +316,12 @@ class FlashLlamaLayer(nn.Module):
     ):
         normed_hidden_states, res = self.input_layernorm(hidden_states, residual)
 
+        if self.layer_idx < LOG_LAYERS:
+            torch.save(
+                normed_hidden_states,
+                f"normed_hidden_states_step{step}_layer{self.layer_idx}_rank{os.getenv('RANK')}.pt",
+            )
+
         # Self Attention
         attn_output = self.self_attn(
             normed_hidden_states,
@@ -331,7 +341,19 @@ class FlashLlamaLayer(nn.Module):
             attn_output, res
         )
 
+        if self.layer_idx < LOG_LAYERS:
+            torch.save(
+                normed_attn_res_output,
+                f"normed_attn_res_output_step{step}_layer{self.layer_idx}_rank{os.getenv('RANK')}.pt",
+            )
+
         mlp_output = self.mlp(normed_attn_res_output)
+
+        if self.layer_idx < LOG_LAYERS:
+            torch.save(
+                mlp_output,
+                f"mlp_output_step{step}_layer{self.layer_idx}_rank{os.getenv('RANK')}.pt",
+            )
 
         return mlp_output, attn_res
 
